@@ -8,6 +8,7 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
+from custom_components.light_manager.const import TICK_SECONDS
 from custom_components.light_manager.light_tracker import Mode
 from custom_components.light_manager.models import Phase
 
@@ -250,6 +251,35 @@ async def test_failed_command_does_not_block_others_and_is_retried(
         {"brightness": 51, "color_temp_kelvin": 2200, "transition": 2}
     ]
     assert lights.calls_for("light.dimmer") == []
+
+
+async def test_failed_command_in_a_plateau_is_retried_on_the_next_tick(
+    hass, freezer, lights, setup_integration, caplog
+) -> None:
+    # Noon is far from any ramp: without a retry wake the next evaluation would
+    # be the suppressed 20:30 ramp, hours away.
+    entry = await start(hass, freezer, lights, setup_integration)
+    lights.fail.add("light.lamp")
+    lights.clear()
+
+    with caplog.at_level(logging.WARNING):
+        await runtime(entry).async_press(Phase.NIGHT)
+    assert "light.lamp: command failed" in caplog.text
+    assert lights.calls_for("light.dimmer") == [{"brightness": 51, "transition": 2}]
+
+    lights.fail.clear()
+    lights.clear()
+    tick = dt.timedelta(seconds=TICK_SECONDS)
+    await advance_to(hass, freezer, NOON + tick)
+    assert lights.calls_for("light.lamp") == [
+        {"brightness": 51, "color_temp_kelvin": 2200, "transition": 2}
+    ]
+    assert lights.calls_for("light.dimmer") == []
+
+    # It succeeded, so the retry is over: no further commands.
+    lights.clear()
+    await advance_to(hass, freezer, NOON + 2 * tick)
+    assert lights.calls == []
 
 
 async def test_light_override_values_are_used(

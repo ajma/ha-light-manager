@@ -226,6 +226,29 @@ def test_failed_command_is_rolled_back_so_it_retries() -> None:
     assert tracker.should_send(LightCommand(40))
 
 
+def test_failed_command_does_not_undo_a_newer_command() -> None:
+    tracker = sent_dimmer(pre=120, target=51)
+
+    first = tracker.begin_command(LightCommand(40), "c2", at(30), 2, dim(51))
+    tracker.begin_command(LightCommand(30), "c3", at(31), 2, dim(51))
+    tracker.command_failed(first)  # the older send fails after the newer began
+
+    assert tracker.expected == LightCommand(30)
+    assert tracker.sent_at == at(31)
+    assert not tracker.should_send(LightCommand(30))
+
+
+def test_failed_command_does_not_undo_a_reset_while_in_flight() -> None:
+    tracker = sent_dimmer(pre=120, target=51)
+
+    in_flight = tracker.begin_command(LightCommand(40), "c2", at(30), 2, dim(51))
+    tracker.reset_auto()
+    tracker.command_failed(in_flight)
+
+    assert tracker.expected is None
+    assert tracker.should_send(LightCommand(51))
+
+
 def test_own_contexts_are_remembered_up_to_five() -> None:
     tracker = LightTracker("light.dimmer")
     for i in range(6):

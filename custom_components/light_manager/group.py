@@ -107,6 +107,7 @@ class GroupRuntime:
         self._unsub_state: Callable[[], None] | None = None
         self._unsub_timer: Callable[[], None] | None = None
         self._logged_on_off: set[str] = set()
+        self._retry = False  # a command failed; wake on the next tick to resend
 
     @property
     def active(self) -> bool:
@@ -271,6 +272,7 @@ class GroupRuntime:
             if self.hold is not None and not self.hold.active(now):
                 self.hold = None
                 self._manager.async_schedule_save()
+            self._retry = False  # this evaluation resends to every light that needs it
             self._schedule_next(now)
             if self.active:
                 if cleared:
@@ -280,12 +282,17 @@ class GroupRuntime:
             self._notify()
 
     def _schedule_next(self, now: dt.datetime) -> None:
-        """One timer: the next tick during a ramp, else the next ramp start."""
+        """One timer: the next tick during a ramp, else the next ramp start.
+
+        After a failed command, also wake on the next tick to retry it.
+        """
         info = self.schedule.phase_at(now)
         if info.phase in RAMP_PHASES and info.target is not None:
             wake = min(now + dt.timedelta(seconds=TICK_SECONDS), info.target)
         else:
             wake = info.window_start or info.target or now + dt.timedelta(days=1)
+        if self._retry and self.active:
+            wake = min(wake, now + dt.timedelta(seconds=TICK_SECONDS))
         if self.hold is not None and self.hold.expiry is not None:
             wake = min(wake, self.hold.expiry)
         if self._unsub_timer:
@@ -363,6 +370,8 @@ class GroupRuntime:
         except Exception as err:  # any failure: roll back so it is retried
             tracker.command_failed(previous)
             _LOGGER.warning("%s: command failed: %s", tracker.entity_id, err)
+            self._retry = True
+            self._schedule_next(dt_util.utcnow())
 
     # --- membership and light state ---
 

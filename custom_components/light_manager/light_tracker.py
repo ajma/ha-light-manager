@@ -85,6 +85,7 @@ class _Sent:
     pre_command: Reading | None
     sent_at: dt.datetime | None
     fade_s: float
+    command: LightCommand  # the command being sent
 
 
 def _mired(kelvin: float) -> float:
@@ -117,7 +118,9 @@ class LightTracker:
         current: Reading,
     ) -> _Sent:
         """Record a command about to be sent; returns a snapshot for rollback."""
-        previous = _Sent(self.expected, self.pre_command, self.sent_at, self.fade_s)
+        previous = _Sent(
+            self.expected, self.pre_command, self.sent_at, self.fade_s, command
+        )
         self.expected = command
         self.pre_command = current
         self.sent_at = now
@@ -126,7 +129,14 @@ class LightTracker:
         return previous
 
     def command_failed(self, previous: _Sent) -> None:
-        """Spec §10: a failed send leaves expected as it was, so it's retried."""
+        """Spec §10: a failed send leaves expected as it was, so it's retried.
+
+        If something newer happened while the send was in flight (another command,
+        a return to AUTO, turn-off or unavailable), `expected` is no longer this
+        send's command and is kept as it is.
+        """
+        if self.expected is not previous.command:
+            return
         self.expected = previous.expected
         self.pre_command = previous.pre_command
         self.sent_at = previous.sent_at
