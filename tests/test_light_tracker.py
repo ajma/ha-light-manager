@@ -476,6 +476,22 @@ def test_late_delivery_fires_at_most_once_per_command() -> None:
     assert not tracker.late_delivery("c1", at(7))
 
 
+def test_a_report_after_the_call_returned_spends_late_delivery() -> None:
+    tracker = sent_dimmer(pre=255, target=51)  # returned at T0
+    tracker.on_report()  # the light reported while on: the device has the command
+    tracker.on_turned_off("return_to_auto", at(5))
+
+    assert not tracker.late_delivery("wall", at(6))  # inside the window, foreign
+
+
+def test_a_report_while_the_call_is_in_flight_keeps_late_delivery() -> None:
+    tracker = sent_dimmer(pre=255, target=51, finished=None)
+    tracker.on_report()  # mid-fade report: the command may still be queued
+    tracker.on_turned_off("return_to_auto", at(5))
+
+    assert tracker.late_delivery("wall", at(6))
+
+
 # --- Explicit turn-on detection (spec §7.4) ---
 
 

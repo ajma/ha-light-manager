@@ -503,7 +503,8 @@ class GroupRuntime:
             )
 
     def _handle_report(self, tracker: LightTracker, old: State, new: State) -> None:
-        """Spec §7.2: classify an on->on report from an AUTO light."""
+        """Spec §7.2: an on->on report; an AUTO light's is classified."""
+        tracker.on_report()  # any report counts, an overridden light's too
         if tracker.mode is not Mode.AUTO:
             return
         result = tracker.classify(

@@ -185,6 +185,14 @@ class LightTracker:
         self.expected = None
         self.unconfirmed = False
 
+    def on_report(self) -> None:
+        """Spec §7.4: the light reported while on after our call returned.
+
+        That command has landed, so a later off->on can't be its late delivery.
+        """
+        if self.finished_at is not None:
+            self.sent_at = None
+
     def late_delivery(self, context_id: str | None, now: dt.datetime) -> bool:
         """Spec §7.4: is this off->on our queued command landing after a manual off?"""
         off_at, self.off_at = self.off_at, None  # every turn-on consumes the off

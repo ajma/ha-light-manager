@@ -140,7 +140,6 @@ async def test_overridden_light_off_and_on_returns_to_auto(
 ) -> None:
     entry = await start(hass, freezer, lights, setup_integration)
     lights.update("light.lamp", brightness=80)
-    freezer.tick(dt.timedelta(seconds=30))  # past the settle window (spec §7.4)
     lights.set("light.lamp", "off")
     lights.set("light.lamp", "on", brightness=80, color_temp_kelvin=3000)
     await hass.async_block_till_done()
@@ -160,7 +159,6 @@ async def test_stay_overridden_survives_off_and_on(
         hass, freezer, lights, setup_integration, off_behavior="stay_overridden"
     )
     lights.update("light.lamp", brightness=80)
-    freezer.tick(dt.timedelta(seconds=30))  # past the settle window (spec §7.4)
     lights.set("light.lamp", "off")
     lights.clear()
     lights.set("light.lamp", "on", brightness=80)
@@ -445,6 +443,28 @@ async def test_explicit_turn_on_after_a_manual_off_is_not_reversed(
     assert lights.calls_for("light.dimmer", "turn_off") == []
     assert hass.states.get("light.dimmer").state == "on"
     assert runtime(entry).trackers["light.dimmer"].mode is Mode.OVERRIDDEN
+
+
+async def test_wall_off_and_on_after_the_light_reported_is_not_reversed(
+    hass, freezer, lights, setup_integration
+) -> None:
+    # Once the dimmer has reported our command (without our context, as Z-Wave
+    # does) the command can't land late, so a quick wall off/on is the user's.
+    freezer.move_to(local(2026, 9, 30, 20, 40))
+    lights.add_dimmer("light.dimmer")
+    lights.silent.add("light.dimmer")  # accepts the call, reports on its own
+    await setup_integration(group_data(lights=["light.dimmer"]))
+    level = lights.calls_for("light.dimmer")[-1]["brightness"]
+    lights.update("light.dimmer", brightness=level)  # the device's report
+
+    lights.set("light.dimmer", "off")  # the wall switch, off and on again
+    lights.clear()
+    lights.set("light.dimmer", "on", brightness=level)
+    await hass.async_block_till_done()
+
+    assert lights.calls_for("light.dimmer", "turn_off") == []
+    assert lights.calls_for("light.dimmer") == [{"brightness": level, "transition": 0}]
+    assert hass.states.get("light.dimmer").state == "on"
 
 
 async def test_overlapping_applies_send_the_command_once(
