@@ -17,8 +17,14 @@ permissions:
   contents: read
 
 jobs:
+  guard:
+    name: Check branch
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$GITHUB_REF" = refs/heads/main || { echo "::error::Run Release from the main branch"; exit 1; }
+
   ci:
-    if: github.ref == 'refs/heads/main'
+    needs: guard
     uses: ./.github/workflows/ci.yml
 
   release:
@@ -52,6 +58,11 @@ jobs:
           mv manifest.tmp "$MANIFEST"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Build zip
+        run: |
+          cd custom_components/light_manager
+          zip -r "$RUNNER_TEMP/light_manager.zip" . -x '__pycache__/*' '*.pyc'
+
       - name: Commit and tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -63,11 +74,6 @@ jobs:
           git commit -am "Release v$VERSION"
           git tag -a "v$VERSION" -m "v$VERSION"
           git push --atomic origin HEAD:main "v$VERSION"
-
-      - name: Build zip
-        run: |
-          cd custom_components/light_manager
-          zip -r "$RUNNER_TEMP/light_manager.zip" . -x '__pycache__/*' '*.pyc'
 
       - name: Publish GitHub release
         env:

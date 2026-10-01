@@ -58,12 +58,22 @@ uv run ruff check . && uv run ruff format --check .
 Releases are made from GitHub Actions:
 
 1. Go to **Actions → Release → Run workflow** on `main`.
-2. Pick **patch**, **minor** or **major**.
+2. Pick **patch**, **minor** or **major**. The manifest starts at `0.0.0`, so pick
+   **minor** for the first release (v0.1.0).
 
 The workflow:
-1. Runs CI.
-2. Bumps `version` in `manifest.json`.
-3. Commits `Release vX.Y.Z` and tags it.
-4. Publishes a GitHub release with `light_manager.zip`, which HACS installs.
+1. Fails at once if it wasn't started from `main`.
+2. Runs CI.
+3. Bumps `version` in `manifest.json` and builds `light_manager.zip` with it.
+4. Commits `Release vX.Y.Z` and tags it.
+5. Publishes a GitHub release with `light_manager.zip`, which HACS installs.
+
+If the run fails after the tag was pushed, publish the release by hand: build the
+zip from `custom_components/light_manager`, then run
+`gh release create vX.Y.Z light_manager.zip --verify-tag --generate-notes`.
+Or delete the tag and run the workflow again.
+
+Branch protection on `main` that blocks pushes by `GITHUB_TOKEN` also blocks the
+release commit.
 
 HACS validation needs the GitHub repository to have a description and topics.
