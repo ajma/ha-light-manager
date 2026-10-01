@@ -1,0 +1,140 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Light Manager",
+        "description": "Light Manager has no settings of its own. After adding it, add a light group."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Light Manager is already set up. Add light groups to it instead."
+    }
+  },
+  "config_subentries": {
+    "group": {
+      "entry_type": "Light group",
+      "initiate_flow": {
+        "user": "Add light group",
+        "reconfigure": "Reconfigure light group"
+      },
+      "step": {
+        "user": {
+          "title": "Add light group (step 1 of 2)",
+          "description": "Pick the lights and their day and night settings. Timing details come next.",
+          "data": {
+            "name": "Name",
+            "lights": "Lights",
+            "day_brightness_pct": "Day brightness",
+            "day_color_temp_kelvin": "Day color temperature",
+            "day_target": "Day starts at",
+            "night_brightness_pct": "Night brightness",
+            "night_color_temp_kelvin": "Night color temperature",
+            "night_target": "Night starts at",
+            "transition_min": "Transition",
+            "off_behavior": "When an overridden light is turned off"
+          },
+          "data_description": {
+            "name": "Used for the group's device and entity names.",
+            "lights": "Light groups (helpers) are expanded into their member lights.",
+            "day_target": "The lights reach the day settings at this time.",
+            "night_target": "The lights reach the night settings at this time.",
+            "transition_min": "Minutes the lights take to change between day and night. The change ends at the target time. 0 switches instantly.",
+            "off_behavior": "A light you change by hand stops following the schedule until it is turned off and on again, or until the next transition starts."
+          }
+        },
+        "settings": {
+          "title": "Edit group settings (step 1 of 2)",
+          "description": "Change the lights and their day and night settings. Timing details come next.",
+          "data": {
+            "name": "Name",
+            "lights": "Lights",
+            "day_brightness_pct": "Day brightness",
+            "day_color_temp_kelvin": "Day color temperature",
+            "day_target": "Day starts at",
+            "night_brightness_pct": "Night brightness",
+            "night_color_temp_kelvin": "Night color temperature",
+            "night_target": "Night starts at",
+            "transition_min": "Transition",
+            "off_behavior": "When an overridden light is turned off"
+          },
+          "data_description": {
+            "name": "Used for the group's device and entity names.",
+            "lights": "Light groups (helpers) are expanded into their member lights.",
+            "day_target": "The lights reach the day settings at this time.",
+            "night_target": "The lights reach the night settings at this time.",
+            "transition_min": "Minutes the lights take to change between day and night. The change ends at the target time. 0 switches instantly.",
+            "off_behavior": "A light you change by hand stops following the schedule until it is turned off and on again, or until the next transition starts."
+          }
+        },
+        "timing": {
+          "title": "Timing (step 2 of 2)",
+          "data": {
+            "day_offset_min": "Sunrise offset",
+            "day_time": "Day time",
+            "night_offset_min": "Sunset offset",
+            "night_time": "Night time"
+          },
+          "data_description": {
+            "day_offset_min": "Minutes after sunrise. Negative is earlier.",
+            "night_offset_min": "Minutes after sunset. Negative is earlier."
+          }
+        },
+        "reconfigure": {
+          "title": "Reconfigure {name}",
+          "menu_options": {
+            "settings": "Edit group settings",
+            "customize": "Customize a light"
+          }
+        },
+        "customize": {
+          "title": "Customize a light",
+          "description": "Pick a light to give its own brightness or color temperature.",
+          "data": {
+            "light": "Light"
+          }
+        },
+        "customize_light": {
+          "title": "Customize {light}",
+          "description": "Leave a field blank to follow the group (day: {day}; night: {night}). Clear every field to remove the customization.",
+          "data": {
+            "day_brightness_pct": "Day brightness",
+            "day_color_temp_kelvin": "Day color temperature",
+            "night_brightness_pct": "Night brightness",
+            "night_color_temp_kelvin": "Night color temperature"
+          }
+        }
+      },
+      "error": {
+        "name_required": "Enter a name.",
+        "name_taken": "Another group already has this name.",
+        "no_lights": "Pick at least one light.",
+        "light_in_other_group": "Already in another group: {conflicts}",
+        "transition_too_long": "The transition is longer than the gap between the day and night targets."
+      },
+      "abort": {
+        "reconfigure_successful": "The group was updated.",
+        "no_lights_to_customize": "This group has no lights to customize yet."
+      }
+    }
+  },
+  "selector": {
+    "day_target": {
+      "options": {
+        "sun": "Sunrise",
+        "fixed": "Fixed time"
+      }
+    },
+    "night_target": {
+      "options": {
+        "sun": "Sunset",
+        "fixed": "Fixed time"
+      }
+    },
+    "off_behavior": {
+      "options": {
+        "return_to_auto": "Return to automatic",
+        "stay_overridden": "Stay overridden"
+      }
+    }
+  }
+}
