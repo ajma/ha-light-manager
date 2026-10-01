@@ -227,8 +227,10 @@ Example, day 100%/4000 K to night 20%/2200 K over 30 minutes:
 
 Each member light has a tracker in state **AUTO** or **OVERRIDDEN**, plus:
 - `expected`: the last values we sent. It's cleared when the light returns to AUTO, turns off or becomes unavailable, so the current target is always resent afterwards.
+- `unconfirmed`: our call for `expected` failed. The light may or may not have applied it, so `expected` still explains a late report of it (§7.2), but it is resent on the next evaluation (§10).
 - `pre_command`: the light's reported values just before our last command
-- `sent_at` and `fade_s` of our last command
+- `sent_at`, `finished_at` and `fade_s` of our last command: when the call started, when it returned or failed (unset while it's in flight), and its fade
+- `off_at`: when the light last turned off, used once by the next turn-on (§7.4)
 - the context IDs of our recent commands to this light
 
 ### 7.2 Classifying a state report
@@ -241,7 +243,7 @@ This applies only to reports where the light is on both before and after (on/off
 A change is **explained (ours)** if any of these holds:
 1. **Context:** the report's context ID is one of our recent command contexts for this light.
 2. **Tolerance:** the value is within tolerance of `expected`. Tolerances are **±5 of 255 brightness (≈2%)** and **±10 mireds**.
-3. **Settling:** the report arrives within `sent_at + fade_s + 10 s`, and the value lies between `pre_command` and `expected` (inclusive, ± the same tolerance). This covers Z-Wave dimmers that report mid-fade, report late, or stop above the requested minimum.
+3. **Settling:** the report arrives while our call is still in flight or within `finished_at + fade_s + 10 s`, and the value lies between `pre_command` and `expected` (inclusive, ± the same tolerance). This covers Z-Wave dimmers that report mid-fade, report late, or stop above the requested minimum. The window runs from when the call returns, not when it starts, because a busy Z-Wave queue can deliver the command seconds after we issue it.
 
 A manual report sets the light to **OVERRIDDEN**. Classification runs whenever the group is active, not only during ramps. When the group is inactive, reports are ignored.
 
@@ -259,6 +261,7 @@ The tolerances, the 10 s settle window, the 30 s tick and the 2 s fade are const
 A light going from `off` to `on`:
 - **Explicit turn-on:** the state change's context ID matches a recent `light.turn_on` / `light.toggle` service call whose data included brightness (`brightness`, `brightness_pct`, `brightness_step`, `brightness_step_pct`), color (`color_temp_kelvin`, `hs_color`, `xy_color`, `rgb_color`, `rgbw_color`, `rgbww_color`, `color_name`, `white`), or `profile`. The light becomes **OVERRIDDEN**. This covers scenes, automations and dashboard sliders. Explicit-call context IDs are kept for 10 s.
 - **Otherwise** (wall switch, plain turn-on, voice): if the light is OVERRIDDEN with `stay_overridden`, it's left alone. Otherwise it becomes AUTO and is sent the current target **with no fade** (`transition: 0`).
+- **Late delivery after a manual off:** if the light was turned off after our last call started, and the turn-on carries our context, arrives while that call is still in flight, or arrives within `finished_at + fade_s + 10 s`, it's our queued command landing after the user switched the light off. We send `light.turn_off` (with our own context) instead of applying, at most once per command. A turn-on whose context is another recent `light.turn_on` / `light.toggle` call (dashboard, voice, scene, automation) is never treated this way. Known cost: switching a light off and on again at the wall within about 12 s of a ramp command turns it back off once.
 A light going from `unavailable`/`unknown` to `on` isn't a turn-on. It keeps its previous AUTO/OVERRIDDEN state, and if AUTO, it gets the current target with no fade.
 - **Known limitation:** a light switched on outside HA shows its previous level briefly before correction.
 
@@ -328,9 +331,9 @@ Saves are debounced (`Store.async_delay_save`).
 ## 10. Error handling
 
 - **Unavailable/unknown lights:** skipped; state kept (§7.4).
-- **Failed service calls:** log a warning and roll `expected` back to its value before the command, then wake 30 s later to retry (§6.4). If something newer replaced `expected` while the call was in flight (another command, return to AUTO, turn-off, unavailable), the rollback is skipped so the newer state stands (§7.1). Failures never mark a light overridden.
+- **Failed service calls:** keep `expected` as the failed command and mark it `unconfirmed` (§7.1). Z-Wave often applies a command whose call timed out, so its late report must still count as ours. The group wakes 30 s later and resends unconfirmed commands (§6.4). If something newer replaced `expected` while the call was in flight (another command, return to AUTO, turn-off, unavailable), the newer state stands. Log a warning on the first failure for a light, debug for repeats, and info when it recovers. Failures never mark a light overridden.
 - **Lights deleted from HA:** skipped with one warning per load. Other lights continue working.
-- **HA light groups:** a member that is an HA Group-helper light (entity registry platform `group`, with an `entity_id` attribute) is **expanded into its member lights**. Membership changes are picked up by listening to the group entity's state. Groups from other systems (Hue rooms, Zigbee2MQTT groups) are treated as single lights.
+- **HA light groups:** a member that is an HA Group-helper light (entity registry platform `group`) is **expanded into its member lights**. Members are read from the helper's config entry (`options["entities"]`), so they're known even while the helper is unavailable (HA drops its `entity_id` attribute then, and a group of Z-Wave lights is unavailable at startup until Z-Wave JS is ready). YAML groups without a config entry fall back to the `entity_id` state attribute. Membership changes are picked up by listening to the group entity's state. Groups from other systems (Hue rooms, Zigbee2MQTT groups) are treated as single lights.
 - **Form validation:** see §5.3.
 - **Any entry or subentry change** reloads the integration. State is recomputed from the clock and restored from the Store.
 - **Debug logging** records each decision, e.g. `light.den_dimmer: report 10% → ours (rule 3: between 12% and 5%)`.
@@ -406,6 +409,13 @@ All items were checked against Home Assistant 2026.9.4. No fallbacks are needed.
 - One self-rearming timer per group instead of separate interval and point-in-time timers (§6.4)
 - Returning to AUTO clears `expected`, so the same target is resent (§7.1)
 - Restore drops a `return_to_auto` override only when the light is known to be off (§9)
-- A failed command never blocks other lights; any exception rolls the light back and the group retries it 30 s later, including outside ramps. (Changed during implementation: the planned "retry at the next evaluation" left a light that failed on a midday button press wrong until the evening ramp.)
+- A failed command never blocks other lights; the group retries it 30 s later, including outside ramps. (Changed during implementation: the planned "retry at the next evaluation" left a light that failed on a midday button press wrong until the evening ramp.)
 - When a sun event doesn't occur (polar regions), so two targets of the same kind come in a row, the group stays at that setting with no ramp. With no targets at all, it stays at day
 - Releases are GitHub releases built by a manual workflow; the repository owner is `ajma`
+
+**Ruled during implementation (after the final review, on the user's behalf):**
+- A failed command keeps `expected` and is marked unconfirmed rather than rolled back (§7.1, §10), so a Z-Wave command that timed out but landed doesn't look manual
+- A queued command that lands after the user turned the light off is reversed with `light.turn_off` (§7.4)
+- The settle window runs from when our call returns (§7.2)
+- Group-helper members come from the helper's config entry (§10)
+- Rule 1 (our context means ours) is kept as is, although HA attaches our context to any state write within 5 s of our call, so a manual dim in that window counts as ours. A stricter rule risks false overrides from unusual device reports
