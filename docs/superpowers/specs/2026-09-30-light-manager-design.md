@@ -144,8 +144,6 @@ Reconfiguring a group opens a menu:
   1. Pick one of this group's lights. The list shows actual bulbs, with Group helpers expanded into their members (§10), and customized lights are marked.
   2. A form with four optional fields: day brightness, day color temp, night brightness, night color temp. It's pre-filled with the light's current overrides, and the description shows the group values. Color temp fields are omitted for lights without color temp support. A blank field means "follow the group". Clearing all fields removes the customization.
 
-**Fallback:** if HA's subentry reconfigure flows don't support menus (§13), "Edit group settings" becomes the reconfigure flow and gets an optional **step 3: "Customize a light"** (pick a light or "Done", then the override form, looping).
-
 Overrides for lights removed from the group are dropped when the group is saved.
 
 ### 5.5 Stored subentry data
@@ -206,7 +204,12 @@ Example, day 100%/4000 K to night 20%/2200 K over 30 minutes:
 - **During a ramp:** evaluate every **30 s**. Each command uses `transition: 2` (seconds). A light is skipped if its rounded target equals the last value we sent it.
 - **At the target time:** one final evaluation, landing exactly on the setpoint.
 - **Outside ramps:** no periodic commands. Commands are sent only on light turn-on (§7.4), button presses, re-activation, and startup. At startup, AUTO lights that are on get the current target with a 2 s fade.
-- **Timers:** `async_track_point_in_time` for the next ramp start and the target; a 30 s interval only while a ramp is running. After each target passes, the next targets are recomputed.
+- **Timer:** each group has one self-rearming timer (`async_track_point_in_utc_time`). It always wakes at the earliest of these moments:
+  - During a ramp: the next 30 s tick, or the target, whichever is sooner.
+  - Otherwise: the next ramp start, or the target if the ramp is empty (transition 0).
+  - The hold expiry, if a hold is active.
+
+  Each wake recomputes everything from the clock, so a missed or late wake corrects itself.
 
 ### 6.5 Holds (Day now / Night now)
 
@@ -222,7 +225,7 @@ Example, day 100%/4000 K to night 20%/2200 K over 30 minutes:
 ### 7.1 States
 
 Each member light has a tracker in state **AUTO** or **OVERRIDDEN**, plus:
-- `expected`: the last values we sent, or the values we confirmed as already correct when we skipped a send
+- `expected`: the last values we sent. It's cleared when the light returns to AUTO, turns off or becomes unavailable, so the current target is always resent afterwards.
 - `pre_command`: the light's reported values just before our last command
 - `sent_at` and `fade_s` of our last command
 - the context IDs of our recent commands to this light
@@ -262,7 +265,7 @@ A light going from `unavailable`/`unknown` to `on` isn't a turn-on. It keeps its
 
 Capabilities are read from each light's state attributes on every evaluation:
 - **Native `color_temp` in `supported_color_modes`:** send `brightness` and `color_temp_kelvin`, clamped to `min_color_temp_kelvin`–`max_color_temp_kelvin`.
-- **Color modes without `color_temp`** (HS/XY/RGB-family only): send `color_temp_kelvin`, which HA core emulates (verify, §13). Only brightness is used for manual detection.
+- **Color modes without `color_temp`** (HS/XY/RGB-family only): send `color_temp_kelvin`, which HA core converts to the light's color mode (verified, §13). Only brightness is used for manual detection.
 - **Brightness only:** send `brightness` only.
 - **On/off only:** never commanded; logged once at debug level.
 - **Brightness** is sent as `brightness` (1–255) = `max(1, round(pct × 255 / 100))`.
@@ -316,7 +319,7 @@ One `homeassistant.helpers.storage.Store` per parent entry, key `light_manager.<
 
 **On load:**
 - A hold is kept only if its expiry (§6.5, recomputed) is still in the future.
-- An override is kept only if no override-clearing ramp start (§7.3) occurred between its timestamp and now, and (for `return_to_auto`) the light is currently on.
+- An override is kept only if no override-clearing ramp start (§7.3) occurred between its timestamp and now. For `return_to_auto`, the light also must not be known to be `off`. A light whose state is missing or `unavailable` at load keeps its override; Z-Wave lights often appear after Light Manager starts.
 - Groups that exist in the store but no longer exist as subentries are dropped.
 
 Saves are debounced (`Store.async_delay_save`).
@@ -340,10 +343,10 @@ Saves are debounced (`Store.async_delay_save`).
   - `light_tracker`: Z-Wave scenarios (late report with a fresh context; mid-fade reports; settling at 10% when 5% was asked; user sets 100%; a nudge within tolerance; a nudge within the settle band); both `off_behavior` values; explicit vs plain turn-on; unavailable round trip.
 - **Integration tests (HA test instance):**
   - Fake lights: states set via `hass.states.async_set` plus a registered fake `light.turn_on` service that records calls and writes resulting states with a configurable delay and context, to simulate Z-Wave timing.
-  - Config flow: parent creation, both group steps, every validation error, the reconfigure menu (or fallback), and "Customize a light".
+  - Config flow: parent creation, both group steps, every validation error, the reconfigure menu, and "Customize a light".
   - A full 30-minute ramp driven by the fake clock, checking commands per tick.
   - Entities: switch/button semantics from §8, sensor states and attributes, restore after restart (§9).
-- **CI:** a GitHub Actions workflow running pytest, `hassfest`, and HACS validation.
+- **CI:** a GitHub Actions workflow (`ci.yml`) running ruff, pytest, `hassfest` and HACS validation on pushes to `main` and on pull requests.
 - **Final acceptance:** manual install on the user's HA with their Z-Wave dimmers.
 
 ## 12. Packaging
@@ -351,19 +354,25 @@ Saves are debounced (`Store.async_delay_save`).
 - `custom_components/light_manager/` layout with `manifest.json` (`version`, `codeowners`, `documentation`, `issue_tracker`, `requirements: []`).
 - `hacs.json` at the repo root.
 - `pyproject.toml` with pytest and ruff config. Python version and dependency versions match the newest stable HA release (§13).
+- **Releases** come from a manual GitHub Actions workflow (`release.yml`, input `bump`: patch/minor/major). It runs CI and then:
+  1. Bumps `version` in `manifest.json`.
+  2. Commits `Release vX.Y.Z` as the person who started it.
+  3. Tags the commit and pushes the commit and tag together.
+  4. Publishes a GitHub release with `light_manager.zip`.
+- `hacs.json` sets `zip_release`, so HACS installs from that asset. The manifest starts at `0.0.0`; the first release uses `minor` (v0.1.0).
 
-## 13. To verify during planning
+## 13. Verified during planning
 
-Each item has a defined fallback, so none blocks the design.
+All items were checked against Home Assistant 2026.9.4. No fallbacks are needed.
 
-| Item | Why it matters | Fallback |
-|---|---|---|
-| How long an entity keeps a service call's context (`CONTEXT_RECENT_TIME_SECONDS`, believed ~5 s) | §7.2 rule 1 coverage; fade length | Rules 2–3 already cover late reports |
-| Menus inside subentry reconfigure flows | §5.4 | Step-3 loop described in §5.4 |
-| `config_subentry_id` in `async_add_entities` for tying entities to subentries | §4.1 devices/entities | Devices linked via `via_device` and unique IDs |
-| `EVENT_CALL_SERVICE` still fired for every service call (incl. from scenes) | §7.4 explicit turn-on detection | Treat an on-report whose brightness differs from the light's last off-time brightness as explicit |
-| HA core emulating `color_temp_kelvin` for non-CT color lights | §7.5 | Send brightness only for those lights |
-| Newest stable HA release, its Python version, and the matching `pytest-homeassistant-custom-component` | §11–12 | none needed; check and pin |
+| Item | Result |
+|---|---|
+| How long an entity keeps a service call's context | `CONTEXT_RECENT_TIME_SECONDS = 5`. Rules 2–3 (§7.2) cover reports that arrive later. |
+| Menus inside subentry reconfigure flows | Supported. The reconfigure flow is a menu (§5.4). |
+| `config_subentry_id` in `async_add_entities` | Supported. Group devices and entities belong to their subentry. |
+| `EVENT_CALL_SERVICE` for every service call | Fired by the service registry for every call, including those made by scenes and automations, with the caller's context. |
+| HA core converting `color_temp_kelvin` for color lights without `color_temp` | Yes; the light component converts it to the light's color mode. |
+| Newest stable HA release, its Python version, and the matching test package | HA 2026.9.4, Python ≥ 3.14.2, `pytest-homeassistant-custom-component` 0.13.367. |
 
 ## 14. Decisions made during design
 
@@ -391,3 +400,11 @@ Each item has a defined fallback, so none blocks the design.
 - Ranges: brightness 1–100%, color temp 1500–6500 K, offset ±180 min, transition 0–180 min
 - Defaults: day 100%/4000 K at sunrise, night 20%/2200 K at sunset, 30 min transition
 - Entity naming `…_automatic`, `…_day_now`, `…_night_now`, `…_phase`
+
+**Ruled during planning (on the user's behalf):**
+- One self-rearming timer per group instead of separate interval and point-in-time timers (§6.4)
+- Returning to AUTO clears `expected`, so the same target is resent (§7.1)
+- Restore drops a `return_to_auto` override only when the light is known to be off (§9)
+- A failed command never blocks other lights; any exception rolls the light back so it's retried on the next evaluation. A failure of the final command at the target time is retried at the next evaluation (e.g. turn-on or the next ramp)
+- When a sun event doesn't occur (polar regions), so two targets of the same kind come in a row, the group stays at that setting with no ramp. With no targets at all, it stays at day
+- Releases are GitHub releases built by a manual workflow; the repository owner is `ajma`
