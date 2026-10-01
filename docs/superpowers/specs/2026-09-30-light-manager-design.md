@@ -208,8 +208,9 @@ Example, day 100%/4000 K to night 20%/2200 K over 30 minutes:
   - During a ramp: the next 30 s tick, or the target, whichever is sooner.
   - Otherwise: the next ramp start, or the target if the ramp is empty (transition 0).
   - The hold expiry, if a hold is active.
+  - After a failed command, 30 s from the failure while the group is active, so the retry happens even outside a ramp (§10).
 
-  Each wake recomputes everything from the clock, so a missed or late wake corrects itself.
+  Each wake recomputes everything from the clock, so a missed or late wake corrects itself. A group that has been stopped (entry unload or reload) never re-arms its timer, even if a command that was in flight fails afterwards.
 
 ### 6.5 Holds (Day now / Night now)
 
@@ -327,7 +328,7 @@ Saves are debounced (`Store.async_delay_save`).
 ## 10. Error handling
 
 - **Unavailable/unknown lights:** skipped; state kept (§7.4).
-- **Failed service calls:** log a warning. `expected` is not updated, so the next tick retries. Failures never mark a light overridden.
+- **Failed service calls:** log a warning and roll `expected` back to its value before the command, then wake 30 s later to retry (§6.4). If something newer replaced `expected` while the call was in flight (another command, return to AUTO, turn-off, unavailable), the rollback is skipped so the newer state stands (§7.1). Failures never mark a light overridden.
 - **Lights deleted from HA:** skipped with one warning per load. Other lights continue working.
 - **HA light groups:** a member that is an HA Group-helper light (entity registry platform `group`, with an `entity_id` attribute) is **expanded into its member lights**. Membership changes are picked up by listening to the group entity's state. Groups from other systems (Hue rooms, Zigbee2MQTT groups) are treated as single lights.
 - **Form validation:** see §5.3.
@@ -405,6 +406,6 @@ All items were checked against Home Assistant 2026.9.4. No fallbacks are needed.
 - One self-rearming timer per group instead of separate interval and point-in-time timers (§6.4)
 - Returning to AUTO clears `expected`, so the same target is resent (§7.1)
 - Restore drops a `return_to_auto` override only when the light is known to be off (§9)
-- A failed command never blocks other lights; any exception rolls the light back so it's retried on the next evaluation. A failure of the final command at the target time is retried at the next evaluation (e.g. turn-on or the next ramp)
+- A failed command never blocks other lights; any exception rolls the light back and the group retries it 30 s later, including outside ramps. (Changed during implementation: the planned "retry at the next evaluation" left a light that failed on a midday button press wrong until the evening ramp.)
 - When a sun event doesn't occur (polar regions), so two targets of the same kind come in a row, the group stays at that setting with no ramp. With no targets at all, it stays at day
 - Releases are GitHub releases built by a manual workflow; the repository owner is `ajma`
