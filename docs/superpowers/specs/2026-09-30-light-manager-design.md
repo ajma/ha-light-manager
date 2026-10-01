@@ -229,7 +229,7 @@ Each member light has a tracker in state **AUTO** or **OVERRIDDEN**, plus:
 - `expected`: the last values we sent. It's cleared when the light returns to AUTO, turns off or becomes unavailable, so the current target is always resent afterwards.
 - `unconfirmed`: our call for `expected` failed. The light may or may not have applied it, so `expected` still explains a late report of it (§7.2), but it is resent on the next evaluation (§10).
 - `pre_command`: the light's reported values just before our last command
-- `sent_at`, `finished_at` and `fade_s` of our last command: when the call started, when it returned or failed (unset while it's in flight), and its fade
+- `sent_at`, `finished_at` and `fade_s` of our last command: when the call started, when it returned or failed (unset while it's in flight), and its fade. `sent_at` is cleared once the command can no longer be a late delivery (§7.4)
 - `off_at`: when the light last turned off, used once by the next turn-on (§7.4)
 - the context IDs of our recent commands to this light
 
@@ -419,3 +419,4 @@ All items were checked against Home Assistant 2026.9.4. No fallbacks are needed.
 - The settle window runs from when our call returns (§7.2)
 - Group-helper members come from the helper's config entry (§10)
 - Rule 1 (our context means ours) is kept as is, although HA attaches our context to any state write within 5 s of our call, so a manual dim in that window counts as ours. A stricter rule risks false overrides from unusual device reports
+- A command stops counting as a possible late delivery once the light reports while on after our call returned (§7.4), so the ~12 s window rarely covers a whole ramp tick
