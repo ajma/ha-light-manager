@@ -1,0 +1,15 @@
+{
+  "domain": "light_manager",
+  "name": "Light Manager",
+  "codeowners": [
+    "@ajma"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/ajma/ha-light-manager",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/ajma/ha-light-manager/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.0.0"
+}
