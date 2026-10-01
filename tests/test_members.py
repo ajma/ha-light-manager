@@ -2,8 +2,11 @@
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.light_manager.members import expand_lights
+
+from .common import add_config_entry_helper
 
 
 def add_helper(hass: HomeAssistant, object_id: str, members: list[str] | None) -> str:
@@ -60,3 +63,48 @@ async def test_helper_cycles_terminate(hass: HomeAssistant) -> None:
 
     assert lights == ["light.lamp"]
     assert helpers == [first.entity_id, second]
+
+
+async def test_helper_members_come_from_its_config_entry_while_unavailable(
+    hass: HomeAssistant,
+) -> None:
+    helper = add_config_entry_helper(hass, "zwave", ["light.bed", "light.hall"])
+    assert "entity_id" not in hass.states.get(helper).attributes
+
+    assert expand_lights(hass, [helper, "light.porch"]) == (
+        ["light.bed", "light.hall", "light.porch"],
+        [helper],
+    )
+
+
+async def test_config_entry_members_can_be_registry_ids(hass: HomeAssistant) -> None:
+    registry = er.async_get(hass)
+    bed = registry.async_get_or_create("light", "zwave_js", "bed-1")
+    helper = add_config_entry_helper(hass, "zwave", [bed.id, "light.hall", "gone-id"])
+
+    # Entity IDs and registry UUIDs both resolve; an unknown UUID is skipped.
+    assert expand_lights(hass, [helper]) == ([bed.entity_id, "light.hall"], [helper])
+
+
+async def test_config_entry_helpers_expand_recursively(hass: HomeAssistant) -> None:
+    upstairs = add_config_entry_helper(hass, "upstairs", ["light.bed"])
+    house = add_config_entry_helper(hass, "house", [upstairs, "light.kitchen"])
+
+    assert expand_lights(hass, [house]) == (
+        ["light.bed", "light.kitchen"],
+        [house, upstairs],
+    )
+
+
+async def test_config_entry_without_members_falls_back_to_the_state(
+    hass: HomeAssistant,
+) -> None:
+    # Not a group-domain entry (or no "entities" option): read the state instead.
+    other = MockConfigEntry(domain="other", options={"entities": ["light.nope"]})
+    other.add_to_hass(hass)
+    entry = er.async_get(hass).async_get_or_create(
+        "light", "group", "odd", config_entry=other, suggested_object_id="odd"
+    )
+    hass.states.async_set(entry.entity_id, "on", {"entity_id": ["light.lamp"]})
+
+    assert expand_lights(hass, [entry.entity_id]) == (["light.lamp"], [entry.entity_id])

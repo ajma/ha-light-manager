@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from custom_components.light_manager.light_tracker import Mode
 from custom_components.light_manager.models import Phase
 
-from .common import STORAGE_KEY, group_data, local
+from .common import STORAGE_KEY, add_config_entry_helper, group_data, local
 
 NOON = local(2026, 9, 30, 12, 0)
 
@@ -137,6 +137,24 @@ async def test_override_kept_while_light_has_not_loaded_yet(
 
     entry = await setup_integration(group_data(), stored=data)
     lights.add_color_temp("light.lamp", brightness=30)
+    await hass.async_block_till_done()
+
+    tracker = entry.runtime_data.groups["group_1"].trackers["light.lamp"]
+    assert tracker.mode is Mode.OVERRIDDEN
+    assert lights.calls_for("light.lamp") == []
+
+
+async def test_override_restored_for_member_of_an_unavailable_group_helper(
+    hass: HomeAssistant, freezer, lights, setup_integration
+) -> None:
+    # At startup a group of Z-Wave lights is unavailable and has no entity_id
+    # attribute, but its config entry still lists the members (spec §10).
+    freezer.move_to(local(2026, 9, 30, 14, 0))
+    helper = add_config_entry_helper(hass, "living", ["light.lamp"])
+    data = stored(overridden={"light.lamp": iso(2026, 9, 30, 13, 0)})
+
+    entry = await setup_integration(group_data(lights=[helper]), stored=data)
+    lights.add_color_temp("light.lamp", brightness=30)  # Z-Wave finished loading
     await hass.async_block_till_done()
 
     tracker = entry.runtime_data.groups["group_1"].trackers["light.lamp"]

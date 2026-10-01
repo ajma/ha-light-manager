@@ -10,7 +10,11 @@ from zoneinfo import ZoneInfo
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
+from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 PACIFIC = ZoneInfo("US/Pacific")
 ENTRY_ID = "lm_entry"
@@ -38,6 +42,36 @@ def group_data(**changes: Any) -> dict[str, Any]:
     }
     data.update(changes)
     return data
+
+
+def add_config_entry_helper(
+    hass: HomeAssistant, object_id: str, members: list[str]
+) -> str:
+    """A UI-created Group helper, unavailable and without an entity_id attribute.
+
+    That is how a group of Z-Wave lights looks until Z-Wave JS is ready: HA drops
+    the extra state attributes while an entity is unavailable.
+    """
+    config_entry = MockConfigEntry(
+        domain="group",
+        options={
+            "group_type": "light",
+            "name": object_id,
+            "entities": members,
+            "hide_members": False,
+            "all": False,
+        },
+    )
+    config_entry.add_to_hass(hass)
+    entry = er.async_get(hass).async_get_or_create(
+        "light",
+        "group",
+        object_id,
+        config_entry=config_entry,
+        suggested_object_id=object_id,
+    )
+    hass.states.async_set(entry.entity_id, "unavailable")
+    return entry.entity_id
 
 
 async def advance_to(

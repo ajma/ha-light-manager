@@ -321,3 +321,56 @@ async def test_clearing_every_field_removes_the_customization(
 
     assert result["reason"] == "reconfigure_successful"
     assert entry.subentries["group_1"].data["light_overrides"] == {}
+
+
+async def test_no_lights_to_customize_when_the_only_light_is_an_unknown_helper(
+    hass: HomeAssistant, lights: FakeLights, setup_integration: SetupIntegration
+) -> None:
+    # A helper with no config entry and no state has no members yet.
+    helper = er.async_get(hass).async_get_or_create(
+        "light", "group", "ghost", suggested_object_id="ghost"
+    )
+    entry = await setup_integration(group_data(lights=[helper.entity_id]))
+
+    result = await start_reconfigure(hass, entry)
+    result = await configure(hass, result, {"next_step_id": "customize"})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_lights_to_customize"
+
+
+@pytest.mark.parametrize("case", ["unavailable", "unknown", "stored_on_a_dimmer"])
+async def test_kelvin_fields_stay_when_the_light_cannot_say_if_it_has_them(
+    hass: HomeAssistant,
+    lights: FakeLights,
+    setup_integration: SetupIntegration,
+    case: str,
+) -> None:
+    # An unavailable light has no attributes, so its capabilities are unknown. A
+    # stored kelvin override must never be erased by saving with the fields hidden.
+    if case == "stored_on_a_dimmer":
+        lights.add_dimmer("light.lamp")
+    else:
+        hass.states.async_set("light.lamp", case)
+    overrides = {
+        "light.lamp": {"day_color_temp_kelvin": 3000, "night_brightness_pct": 10}
+    }
+    entry = await setup_integration(
+        group_data(lights=["light.lamp"], light_overrides=overrides)
+    )
+    result = await start_reconfigure(hass, entry)
+    result = await configure(hass, result, {"next_step_id": "customize"})
+    result = await configure(hass, result, {"light": "light.lamp"})
+
+    assert suggested(result) == {
+        "day_brightness_pct": None,
+        "day_color_temp_kelvin": 3000,
+        "night_brightness_pct": 10,
+        "night_color_temp_kelvin": None,
+    }
+
+    form = {key: value for key, value in suggested(result).items() if value is not None}
+    result = await configure(hass, result, form)  # submitted unchanged
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.subentries["group_1"].data["light_overrides"] == overrides

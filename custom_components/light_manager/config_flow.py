@@ -15,6 +15,7 @@ from homeassistant.config_entries import (
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     ColorTempSelector,
@@ -83,6 +84,7 @@ DAY_TIME = "day_time"
 NIGHT_OFFSET = "night_offset_min"
 NIGHT_TIME = "night_time"
 CONF_LIGHT = "light"
+KELVIN_KEYS = (DAY_KELVIN, NIGHT_KELVIN)  # the *_color_temp_kelvin OVERRIDE_KEYS
 
 SETTINGS_DEFAULTS: dict[str, Any] = {
     DAY_BRIGHTNESS: DEFAULT_DAY_BRIGHTNESS_PCT,
@@ -442,9 +444,14 @@ class GroupSubentryFlow(ConfigSubentryFlow):
                 data={**subentry.data, CONF_LIGHT_OVERRIDES: overrides},
             )
         state = self.hass.states.get(self._light)
+        # An unavailable light has no attributes, so show the kelvin fields rather
+        # than hide them. They also stay while a kelvin override is stored, so
+        # saving can never silently erase it.
         color_temp = (
             state is None
+            or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
             or capabilities_from_attributes(state.attributes).any_color_temp
+            or any(key in KELVIN_KEYS for key in overrides.get(self._light, {}))
         )
         settings = self._settings
         return self.async_show_form(
