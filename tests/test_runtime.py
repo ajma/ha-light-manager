@@ -1,11 +1,13 @@
 """Runtime tests: ramps, overrides, turn-on handling and failures (fake clock)."""
 
+import asyncio
 import datetime as dt
 import logging
 
 import pytest
 from freezegun.api import FrozenDateTimeFactory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.light_manager.const import TICK_SECONDS
@@ -279,6 +281,41 @@ async def test_failed_command_in_a_plateau_is_retried_on_the_next_tick(
     # It succeeded, so the retry is over: no further commands.
     lights.clear()
     await advance_to(hass, freezer, NOON + 2 * tick)
+    assert lights.calls == []
+
+
+async def test_send_failing_after_stop_does_not_rearm_the_timer(
+    hass, freezer, lights, setup_integration
+) -> None:
+    # Reload-on-change unloads the entry while commands may be in flight; a stale
+    # runtime must not keep commanding lights next to its replacement.
+    entry = await start(hass, freezer, lights, setup_integration)
+    group = runtime(entry)
+    release = asyncio.Event()
+
+    async def hung_turn_on(call: ServiceCall) -> None:
+        lights.calls.append(call)
+        await release.wait()
+        raise HomeAssistantError("did not respond")
+
+    hass.services.async_register("light", "turn_on", hung_turn_on)
+    lights.clear()
+
+    press = hass.async_create_task(group.async_press(Phase.NIGHT))
+    for _ in range(100):  # let both sends reach the hung service
+        if len(lights.calls) == 2:
+            break
+        await asyncio.sleep(0)
+    assert len(lights.calls) == 2
+
+    group.async_stop()  # the entry unloads with both sends in flight
+    release.set()
+    await press
+    lights.clear()
+
+    tick = dt.timedelta(seconds=TICK_SECONDS)
+    for count in range(1, 6):
+        await advance_to(hass, freezer, NOON + count * tick)
     assert lights.calls == []
 
 

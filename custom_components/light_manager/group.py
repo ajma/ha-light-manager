@@ -108,6 +108,7 @@ class GroupRuntime:
         self._unsub_timer: Callable[[], None] | None = None
         self._logged_on_off: set[str] = set()
         self._retry = False  # a command failed; wake on the next tick to resend
+        self._stopped = False  # async_stop ran; never arm the timer again
 
     @property
     def active(self) -> bool:
@@ -138,6 +139,7 @@ class GroupRuntime:
 
     @callback
     def async_stop(self) -> None:
+        self._stopped = True
         if self._unsub_state:
             self._unsub_state()
             self._unsub_state = None
@@ -284,8 +286,12 @@ class GroupRuntime:
     def _schedule_next(self, now: dt.datetime) -> None:
         """One timer: the next tick during a ramp, else the next ramp start.
 
-        After a failed command, also wake on the next tick to retry it.
+        After a failed command, also wake on the next tick to retry it. Once the
+        runtime is stopped it never arms a timer again, even if a send or an
+        evaluation that was in flight at the time finishes afterwards.
         """
+        if self._stopped:
+            return
         info = self.schedule.phase_at(now)
         if info.phase in RAMP_PHASES and info.target is not None:
             wake = min(now + dt.timedelta(seconds=TICK_SECONDS), info.target)
