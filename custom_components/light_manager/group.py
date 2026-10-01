@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.light import ATTR_TRANSITION
 from homeassistant.components.light import DOMAIN as LIGHT_DOMAIN
-from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_ON, STATE_OFF, STATE_ON
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+    STATE_OFF,
+    STATE_ON,
+)
 from homeassistant.core import (
     Context,
     Event,
@@ -108,6 +114,7 @@ class GroupRuntime:
         self._unsub_timer: Callable[[], None] | None = None
         self._logged_on_off: set[str] = set()
         self._retry = False  # a command failed; wake on the next tick to resend
+        self._failing: set[str] = set()  # lights whose last command failed (spec §10)
         self._stopped = False  # async_stop ran; never arm the timer again
 
     @property
@@ -268,6 +275,8 @@ class GroupRuntime:
         await self._async_evaluate(dt_util.utcnow())
 
     async def _async_evaluate(self, now: dt.datetime) -> None:
+        if self._stopped:
+            return
         try:
             cleared = self._cleared_by_ramp(self._last_eval, now, self.hold)
             self._last_eval = now
@@ -287,8 +296,9 @@ class GroupRuntime:
         """One timer: the next tick during a ramp, else the next ramp start.
 
         After a failed command, also wake on the next tick to retry it. Once the
-        runtime is stopped it never arms a timer again, even if a send or an
-        evaluation that was in flight at the time finishes afterwards.
+        runtime is stopped it never arms a timer again. An evaluation arms the timer
+        before its first await, so only a send that fails after the stop can still
+        try to re-arm it.
         """
         if self._stopped:
             return
@@ -320,6 +330,8 @@ class GroupRuntime:
         self, fade: float, only: Iterable[str] | None = None
     ) -> None:
         """Send the current target to AUTO lights that are on and need it."""
+        if self._stopped:
+            return
         now = dt_util.utcnow()
         phase, progress = self._effective_phase(now)
         targets = set(only) if only is not None else None
@@ -345,8 +357,17 @@ class GroupRuntime:
                     _LOGGER.debug("%s: on/off only; never commanded", entity_id)
                 continue
             if tracker.should_send(command):
-                reading = Reading.from_attributes(state.attributes)
-                sends.append(self._async_send(tracker, command, fade, reading, now))
+                # Begin here, not inside the send: two overlapping applies must not
+                # both pass should_send before either has recorded its command.
+                context = Context()
+                tracker.begin_command(
+                    command,
+                    context.id,
+                    now,
+                    fade,
+                    Reading.from_attributes(state.attributes),
+                )
+                sends.append(self._async_send(tracker, command, fade, context))
         if sends:
             await asyncio.gather(*sends)
 
@@ -355,11 +376,8 @@ class GroupRuntime:
         tracker: LightTracker,
         command: LightCommand,
         fade: float,
-        current: Reading,
-        now: dt.datetime,
+        context: Context,
     ) -> None:
-        context = Context()
-        previous = tracker.begin_command(command, context.id, now, fade, current)
         _LOGGER.debug("%s: send %s (fade %ss)", tracker.entity_id, command, fade)
         try:
             await self.hass.services.async_call(
@@ -373,11 +391,20 @@ class GroupRuntime:
                 blocking=True,
                 context=context,
             )
-        except Exception as err:  # any failure: roll back so it is retried
-            tracker.command_failed(previous)
-            _LOGGER.warning("%s: command failed: %s", tracker.entity_id, err)
+        except Exception as err:  # any failure: keep it unconfirmed and retry
+            tracker.command_failed(command, dt_util.utcnow())
+            if tracker.entity_id in self._failing:
+                _LOGGER.debug("%s: command failed again: %s", tracker.entity_id, err)
+            else:
+                self._failing.add(tracker.entity_id)
+                _LOGGER.warning("%s: command failed: %s", tracker.entity_id, err)
             self._retry = True
             self._schedule_next(dt_util.utcnow())
+        else:
+            tracker.command_finished(command, dt_util.utcnow())
+            if tracker.entity_id in self._failing:
+                self._failing.discard(tracker.entity_id)
+                _LOGGER.info("%s: recovered; command succeeded", tracker.entity_id)
 
     # --- membership and light state ---
 
@@ -418,7 +445,7 @@ class GroupRuntime:
         old_state = old.state if old else None
         if new is None or new.state != STATE_ON:
             if new is not None and new.state == STATE_OFF:
-                if tracker.on_turned_off(self.config.off_behavior):
+                if tracker.on_turned_off(self.config.off_behavior, dt_util.utcnow()):
                     self._changed()
             else:
                 tracker.on_unavailable()
@@ -434,12 +461,20 @@ class GroupRuntime:
 
     def _handle_turn_on(self, tracker: LightTracker, context_id: str) -> None:
         """Spec §7.4."""
-        if self._manager.is_explicit_context(context_id) and not tracker.is_own_context(
-            context_id
-        ):
+        own = tracker.is_own_context(context_id)
+        if not own and self._manager.is_explicit_context(context_id):
+            tracker.off_at = None  # every turn-on consumes the off
             _LOGGER.debug("%s: explicit turn-on -> overridden", tracker.entity_id)
             tracker.mark_overridden(dt_util.utcnow())
             self._changed()
+            return
+        if not own and self._manager.is_light_call_context(context_id):
+            tracker.off_at = None  # a dashboard, voice or automation turn-on
+        elif tracker.late_delivery(context_id, dt_util.utcnow()):
+            _LOGGER.debug(
+                "%s: our command landed after a manual off", tracker.entity_id
+            )
+            self._create_task(self._async_turn_off(tracker))
             return
         if tracker.mode is Mode.OVERRIDDEN:
             if self.config.off_behavior == OFF_STAY_OVERRIDDEN:
@@ -447,6 +482,25 @@ class GroupRuntime:
             tracker.reset_auto()
             self._changed()
         self._create_task(self._async_apply(0, only=[tracker.entity_id]))
+
+    async def _async_turn_off(self, tracker: LightTracker) -> None:
+        """Spec §7.4: switch off a light that our queued command turned back on."""
+        context = Context()
+        tracker.add_context(context.id)
+        try:
+            await self.hass.services.async_call(
+                LIGHT_DOMAIN,
+                SERVICE_TURN_OFF,
+                {ATTR_ENTITY_ID: tracker.entity_id},
+                blocking=True,
+                context=context,
+            )
+        except Exception as err:  # no retry: the user can switch it off again
+            _LOGGER.warning(
+                "%s: turning off after a late command failed: %s",
+                tracker.entity_id,
+                err,
+            )
 
     def _handle_report(self, tracker: LightTracker, old: State, new: State) -> None:
         """Spec §7.2: classify an on->on report from an AUTO light."""

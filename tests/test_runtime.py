@@ -3,14 +3,17 @@
 import asyncio
 import datetime as dt
 import logging
+from unittest.mock import patch
 
 import pytest
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from custom_components.light_manager.const import TICK_SECONDS
+from custom_components.light_manager.const import STEP_FADE_SECONDS, TICK_SECONDS
+from custom_components.light_manager.curve import LightCommand
 from custom_components.light_manager.light_tracker import Mode
 from custom_components.light_manager.models import Phase
 
@@ -137,6 +140,7 @@ async def test_overridden_light_off_and_on_returns_to_auto(
 ) -> None:
     entry = await start(hass, freezer, lights, setup_integration)
     lights.update("light.lamp", brightness=80)
+    freezer.tick(dt.timedelta(seconds=30))  # past the settle window (spec §7.4)
     lights.set("light.lamp", "off")
     lights.set("light.lamp", "on", brightness=80, color_temp_kelvin=3000)
     await hass.async_block_till_done()
@@ -156,6 +160,7 @@ async def test_stay_overridden_survives_off_and_on(
         hass, freezer, lights, setup_integration, off_behavior="stay_overridden"
     )
     lights.update("light.lamp", brightness=80)
+    freezer.tick(dt.timedelta(seconds=30))  # past the settle window (spec §7.4)
     lights.set("light.lamp", "off")
     lights.clear()
     lights.set("light.lamp", "on", brightness=80)
@@ -243,7 +248,9 @@ async def test_failed_command_does_not_block_others_and_is_retried(
         await runtime(entry).async_press(Phase.NIGHT)
     assert "light.lamp: command failed" in caplog.text
     assert lights.calls_for("light.dimmer") == [{"brightness": 51, "transition": 2}]
-    assert runtime(entry).trackers["light.lamp"].expected is None
+    lamp = runtime(entry).trackers["light.lamp"]
+    assert lamp.expected == LightCommand(51, 2200)  # kept, to be resent
+    assert lamp.unconfirmed
 
     # The next evaluation (20:30, inside the hold so nothing is reset) retries.
     lights.fail.clear()
@@ -284,6 +291,177 @@ async def test_failed_command_in_a_plateau_is_retried_on_the_next_tick(
     assert lights.calls == []
 
 
+async def test_late_report_of_a_failed_command_is_not_an_override(
+    hass, freezer, lights, setup_integration
+) -> None:
+    # Z-Wave JS raises when a call times out, yet the dimmer often applies the
+    # value and reports it later, without our context (spec §10).
+    entry = await start(hass, freezer, lights, setup_integration)
+    lights.fail.add("light.lamp")
+    lights.clear()
+    await runtime(entry).async_press(Phase.NIGHT)
+    lights.fail.clear()
+    lights.clear()
+
+    freezer.tick(dt.timedelta(seconds=8))
+    lights.update("light.lamp", brightness=51, color_temp_kelvin=2200)  # new Context
+    await hass.async_block_till_done()
+
+    lamp = runtime(entry).trackers["light.lamp"]
+    assert lamp.mode is Mode.AUTO
+
+    # The retry still goes out on the next tick, since the call never confirmed.
+    tick = dt.timedelta(seconds=TICK_SECONDS)
+    await advance_to(hass, freezer, NOON + tick)
+    assert lights.calls_for("light.lamp") == [
+        {"brightness": 51, "color_temp_kelvin": 2200, "transition": 2}
+    ]
+    assert not lamp.unconfirmed
+    assert lamp.mode is Mode.AUTO
+
+    lights.clear()
+    await advance_to(hass, freezer, NOON + 2 * tick)
+    assert lights.calls == []
+
+
+async def test_failure_streak_warns_once_and_logs_the_recovery(
+    hass, freezer, lights, setup_integration, caplog
+) -> None:
+    entry = await start(hass, freezer, lights, setup_integration)
+    lights.fail.add("light.lamp")
+    caplog.set_level(logging.DEBUG, logger="custom_components.light_manager")
+    tick = dt.timedelta(seconds=TICK_SECONDS)
+
+    await runtime(entry).async_press(Phase.NIGHT)
+    await advance_to(hass, freezer, NOON + tick)  # the retry fails too
+
+    ours = [r for r in caplog.records if r.name.startswith("custom_components")]
+    warnings = [r.getMessage() for r in ours if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "light.lamp: command failed" in warnings[0]
+    assert any(
+        r.levelno == logging.DEBUG and "light.lamp: command failed" in r.getMessage()
+        for r in ours
+    )
+    assert "recovered" not in caplog.text
+
+    lights.fail.clear()
+    await advance_to(hass, freezer, NOON + 2 * tick)
+
+    ours = [r for r in caplog.records if r.name.startswith("custom_components")]
+    recovered = [r for r in ours if "recovered" in r.getMessage()]
+    assert len(recovered) == 1
+    assert recovered[0].levelno == logging.INFO
+    assert "light.lamp" in recovered[0].getMessage()
+    assert len([r for r in ours if r.levelno == logging.WARNING]) == 1
+
+
+# --- Late delivery after a manual off (spec §7.4) ---
+
+RAMP_TICK = local(2026, 9, 30, 20, 40, 30)
+
+
+async def held_tick_then_manual_off(hass, freezer, lights, setup_integration):
+    """A ramp tick sends to the dimmer, which is held in flight; the user turns it off.
+
+    Returns (entry, finish): `finish` releases the held command, which then lands,
+    and waits for everything to settle.
+    """
+    freezer.move_to(local(2026, 9, 30, 20, 40))
+    lights.add_dimmer("light.dimmer")
+    entry = await setup_integration(group_data(lights=["light.dimmer"]))
+    arrived, release = lights.hold_next_turn_on()
+    lights.clear()
+
+    freezer.move_to(RAMP_TICK)
+    async_fire_time_changed(hass)  # the tick's command is held, so don't block on it
+    await arrived.wait()
+    freezer.tick(dt.timedelta(seconds=1))
+    lights.set("light.dimmer", "off")  # the wall switch
+
+    async def finish() -> None:
+        release.set()
+        await hass.async_block_till_done()
+
+    return entry, finish
+
+
+async def test_command_landing_after_a_manual_off_is_reversed(
+    hass, freezer, lights, setup_integration
+) -> None:
+    entry, finish = await held_tick_then_manual_off(
+        hass, freezer, lights, setup_integration
+    )
+
+    await finish()  # the queued command lands and turns the light back on
+
+    assert lights.calls_for("light.dimmer", "turn_off") == [{}]
+    assert hass.states.get("light.dimmer").state == "off"
+    assert runtime(entry).trackers["light.dimmer"].mode is Mode.AUTO
+
+
+async def test_dashboard_turn_on_after_a_manual_off_is_not_reversed(
+    hass, freezer, lights, setup_integration
+) -> None:
+    entry, finish = await held_tick_then_manual_off(
+        hass, freezer, lights, setup_integration
+    )
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.dimmer"}, blocking=True
+    )
+    for _ in range(100):  # the tick is still held, so block_till_done would hang
+        if len(lights.calls_for("light.dimmer")) == 3:
+            break
+        await asyncio.sleep(0)
+
+    assert lights.calls_for("light.dimmer", "turn_off") == []
+    transitions = [c.get("transition") for c in lights.calls_for("light.dimmer")]
+    assert transitions == [2, None, 0]  # the held tick, the dashboard, our target
+    assert hass.states.get("light.dimmer").state == "on"
+
+    await finish()  # the old command lands later; nothing reverses anything
+
+    assert lights.calls_for("light.dimmer", "turn_off") == []
+    assert hass.states.get("light.dimmer").state == "on"
+    assert runtime(entry).trackers["light.dimmer"].mode is Mode.AUTO
+
+
+async def test_explicit_turn_on_after_a_manual_off_is_not_reversed(
+    hass, freezer, lights, setup_integration
+) -> None:
+    entry, finish = await held_tick_then_manual_off(
+        hass, freezer, lights, setup_integration
+    )
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": "light.dimmer", "brightness": 80},
+        blocking=True,
+    )
+    await finish()
+
+    assert lights.calls_for("light.dimmer", "turn_off") == []
+    assert hass.states.get("light.dimmer").state == "on"
+    assert runtime(entry).trackers["light.dimmer"].mode is Mode.OVERRIDDEN
+
+
+async def test_overlapping_applies_send_the_command_once(
+    hass, freezer, lights, setup_integration
+) -> None:
+    # Two applies racing (a timer tick and a button press, say) must not both pass
+    # should_send before either has recorded its command.
+    entry = await start(hass, freezer, lights, setup_integration)
+    group = runtime(entry)
+    group.trackers["light.lamp"].reset_auto()
+    lights.clear()
+
+    await asyncio.gather(group._async_apply(2), group._async_apply(2))
+
+    assert lights.calls_for("light.lamp") == [DAY_CMD]
+
+
 async def test_send_failing_after_stop_does_not_rearm_the_timer(
     hass, freezer, lights, setup_integration
 ) -> None:
@@ -317,6 +495,28 @@ async def test_send_failing_after_stop_does_not_rearm_the_timer(
     for count in range(1, 6):
         await advance_to(hass, freezer, NOON + count * tick)
     assert lights.calls == []
+
+
+async def test_nothing_runs_after_stop(
+    hass, freezer, lights, setup_integration
+) -> None:
+    # A reload replaces the runtime; the old one's late evaluations and delayed
+    # saves must not command lights or overwrite the new runtime's stored state.
+    entry = await start(hass, freezer, lights, setup_integration)
+    manager = entry.runtime_data
+    group = runtime(entry)
+    await manager.async_stop()
+    group.trackers["light.lamp"].reset_auto()  # a send would be due
+    lights.clear()
+
+    await group._async_evaluate(NOON + dt.timedelta(seconds=TICK_SECONDS))
+    await group._async_apply(STEP_FADE_SECONDS)
+    with patch.object(manager._store, "async_delay_save") as delay_save:
+        manager.async_schedule_save()
+
+    assert lights.calls == []
+    assert group._unsub_timer is None
+    delay_save.assert_not_called()
 
 
 async def test_light_override_values_are_used(

@@ -77,17 +77,6 @@ class Classification(NamedTuple):
     reason: str
 
 
-@dataclass(frozen=True, slots=True)
-class _Sent:
-    """Snapshot of the command fields, to roll back a failed send."""
-
-    expected: LightCommand | None
-    pre_command: Reading | None
-    sent_at: dt.datetime | None
-    fade_s: float
-    command: LightCommand  # the command being sent
-
-
 def _mired(kelvin: float) -> float:
     return 1e6 / kelvin
 
@@ -100,14 +89,30 @@ class LightTracker:
     mode: Mode = Mode.AUTO
     overridden_at: dt.datetime | None = None
     expected: LightCommand | None = None  # last command sent
+    unconfirmed: bool = False  # the call for `expected` failed; resend it
     pre_command: Reading | None = None  # reading just before that command
-    sent_at: dt.datetime | None = None
+    sent_at: dt.datetime | None = None  # when the call started
+    finished_at: dt.datetime | None = None  # when it returned or failed; None in flight
     fade_s: float = 0
-    _contexts: deque[str] = field(default_factory=lambda: deque(maxlen=RECENT_CONTEXTS))
+    off_at: dt.datetime | None = None  # when the light last turned off (spec §7.4)
+    # The last command begun. Kept when `expected` is cleared, so a call that
+    # returns late can still tell whether it is the newest.
+    _last: LightCommand | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _contexts: deque[str] = field(
+        default_factory=lambda: deque(maxlen=RECENT_CONTEXTS),
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def should_send(self, command: LightCommand) -> bool:
-        """AUTO lights get a command unless it equals the last one sent."""
-        return self.mode is Mode.AUTO and command != self.expected
+        """AUTO lights get a command unless it equals the last one sent.
+
+        A failed command (unconfirmed) is sent again even though it equals it.
+        """
+        return self.mode is Mode.AUTO and (self.unconfirmed or command != self.expected)
 
     def begin_command(
         self,
@@ -116,34 +121,42 @@ class LightTracker:
         now: dt.datetime,
         fade_s: float,
         current: Reading,
-    ) -> _Sent:
-        """Record a command about to be sent; returns a snapshot for rollback."""
-        previous = _Sent(
-            self.expected, self.pre_command, self.sent_at, self.fade_s, command
-        )
+    ) -> None:
+        """Record a command as its call starts."""
         self.expected = command
+        self.unconfirmed = False
         self.pre_command = current
         self.sent_at = now
+        self.finished_at = None
         self.fade_s = fade_s
+        self._last = command
         self._contexts.append(context_id)
-        return previous
 
-    def command_failed(self, previous: _Sent) -> None:
-        """Spec §10: a failed send leaves expected as it was, so it's retried.
+    def command_finished(self, command: LightCommand, now: dt.datetime) -> None:
+        """Our call returned; the settle window (spec §7.2) runs from now."""
+        if self._last is command:
+            self.finished_at = now
 
-        If something newer happened while the send was in flight (another command,
-        a return to AUTO, turn-off or unavailable), `expected` is no longer this
-        send's command and is kept as it is.
+    def command_failed(self, command: LightCommand, now: dt.datetime) -> None:
+        """Spec §10: a failed call keeps `expected`, marked unconfirmed.
+
+        Z-Wave often applies a command whose call timed out, and reports it late
+        without our context, so `expected` must still explain that report. It is
+        resent on the next evaluation. If something newer happened while the call
+        was in flight (another command, a return to AUTO, turn-off or unavailable),
+        `expected` is no longer this command and is left as it is.
         """
-        if self.expected is not previous.command:
-            return
-        self.expected = previous.expected
-        self.pre_command = previous.pre_command
-        self.sent_at = previous.sent_at
-        self.fade_s = previous.fade_s
+        if self._last is command:
+            self.finished_at = now
+        if self.expected is command:
+            self.unconfirmed = True
 
     def is_own_context(self, context_id: str | None) -> bool:
         return context_id is not None and context_id in self._contexts
+
+    def add_context(self, context_id: str) -> None:
+        """Remember a context of ours that isn't a command (the §7.4 turn-off)."""
+        self._contexts.append(context_id)
 
     def mark_overridden(self, now: dt.datetime) -> None:
         self.mode = Mode.OVERRIDDEN
@@ -154,10 +167,13 @@ class LightTracker:
         self.mode = Mode.AUTO
         self.overridden_at = None
         self.expected = None
+        self.unconfirmed = False
 
-    def on_turned_off(self, off_behavior: str) -> bool:
+    def on_turned_off(self, off_behavior: str, now: dt.datetime) -> bool:
         """Spec §7.3. Returns True if the mode changed."""
         self.expected = None
+        self.unconfirmed = False
+        self.off_at = now
         if self.mode is Mode.OVERRIDDEN and off_behavior == OFF_RETURN_TO_AUTO:
             self.mode = Mode.AUTO
             self.overridden_at = None
@@ -167,6 +183,25 @@ class LightTracker:
     def on_unavailable(self) -> None:
         """The light's real level is unknown; resend the target when it's back."""
         self.expected = None
+        self.unconfirmed = False
+
+    def late_delivery(self, context_id: str | None, now: dt.datetime) -> bool:
+        """Spec §7.4: is this off->on our queued command landing after a manual off?"""
+        off_at, self.off_at = self.off_at, None  # every turn-on consumes the off
+        if off_at is None or self.sent_at is None or self.sent_at > off_at:
+            return False  # not switched off since our last call began
+        ours = (
+            self.is_own_context(context_id)
+            or self.finished_at is None  # still in flight
+            or now <= self.finished_at + self._settle_window()
+        )
+        if ours:
+            self.sent_at = None  # at most once per command
+        return ours
+
+    def _settle_window(self) -> dt.timedelta:
+        """How long after our call returns its effects can still be reported."""
+        return dt.timedelta(seconds=self.fade_s + SETTLE_SECONDS)
 
     def classify(
         self,
@@ -235,11 +270,13 @@ class LightTracker:
             return None
         if abs(value - expected) <= tolerance:
             return f"rule 2: within {tolerance} of {expected:g}"
-        if pre is None or self.sent_at is None:
+        if pre is None:
             return None
-        deadline = self.sent_at + dt.timedelta(seconds=self.fade_s + SETTLE_SECONDS)
+        in_window = (
+            self.finished_at is None or now <= self.finished_at + self._settle_window()
+        )
         low, high = min(pre, expected) - tolerance, max(pre, expected) + tolerance
-        if now <= deadline and low <= value <= high:
+        if in_window and low <= value <= high:
             return f"rule 3: between {pre:g} and {expected:g}"
         return None
 

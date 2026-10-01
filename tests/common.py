@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -53,7 +54,8 @@ class FakeLights:
 
     turn_on writes the new state with the caller's context, like a real light.
     Entities in `fail` raise; entities in `silent` accept calls without
-    reporting (a Z-Wave dimmer that reports later via `update`).
+    reporting (a Z-Wave dimmer that reports later via `update`). The next
+    turn_on can be parked in flight with `hold_next_turn_on`.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
@@ -61,6 +63,7 @@ class FakeLights:
         self.calls: list[ServiceCall] = []
         self.fail: set[str] = set()
         self.silent: set[str] = set()
+        self._hold: tuple[asyncio.Event, asyncio.Event] | None = None
         hass.services.async_register("light", "turn_on", self._async_turn_on)
         hass.services.async_register("light", "turn_off", self._async_turn_off)
 
@@ -124,12 +127,24 @@ class FakeLights:
         """An on -> on report with changed attributes."""
         self.set(entity_id, "on", context=context, **attrs)
 
-    def calls_for(self, entity_id: str) -> list[dict[str, Any]]:
+    def calls_for(
+        self, entity_id: str, service: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Data of the calls to one light (turn_on and turn_off, or just `service`)."""
         return [
             {k: v for k, v in call.data.items() if k != "entity_id"}
             for call in self.calls
-            if call.data["entity_id"] == entity_id
+            if call.data["entity_id"] == entity_id and service in (None, call.service)
         ]
+
+    def hold_next_turn_on(self) -> tuple[asyncio.Event, asyncio.Event]:
+        """Park the next light.turn_on in flight, like a busy Z-Wave queue.
+
+        Returns (arrived, release): `arrived` is set once the call is parked, and
+        the call is applied when `release` is set.
+        """
+        self._hold = (asyncio.Event(), asyncio.Event())
+        return self._hold
 
     def clear(self) -> None:
         self.calls.clear()
@@ -137,6 +152,11 @@ class FakeLights:
     async def _async_turn_on(self, call: ServiceCall) -> None:
         self.calls.append(call)
         entity_id = call.data["entity_id"]
+        if self._hold is not None:
+            arrived, release = self._hold
+            self._hold = None
+            arrived.set()
+            await release.wait()
         if entity_id in self.fail:
             raise HomeAssistantError(f"{entity_id} did not respond")
         if entity_id in self.silent:

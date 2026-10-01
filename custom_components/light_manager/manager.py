@@ -14,6 +14,8 @@ from homeassistant.const import (
     ATTR_SERVICE,
     ATTR_SERVICE_DATA,
     EVENT_CALL_SERVICE,
+    SERVICE_TOGGLE,
+    SERVICE_TURN_ON,
 )
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.storage import Store
@@ -44,9 +46,11 @@ class Manager:
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
-        self._explicit: dict[str, dt.datetime] = {}
+        # light.turn_on/toggle calls by context ID: (when, whether it set values)
+        self._calls: dict[str, tuple[dt.datetime, bool]] = {}
         self._listeners: list[Callable[[], None]] = []
         self._unsub_call_service: Callable[[], None] | None = None
+        self._stopped = False  # async_stop ran; nothing may save or run after it
 
     async def async_start(self) -> None:
         stored = await self._store.async_load() or {}
@@ -75,6 +79,7 @@ class Manager:
         self.async_schedule_save()  # drops groups that no longer exist
 
     async def async_stop(self) -> None:
+        self._stopped = True
         if self._unsub_call_service:
             self._unsub_call_service()
             self._unsub_call_service = None
@@ -98,29 +103,49 @@ class Manager:
 
     @callback
     def async_schedule_save(self) -> None:
+        # An old runtime's delayed save would overwrite the new one's: same key.
+        if self._stopped:
+            return
         self._store.async_delay_save(self._snapshot, SAVE_DELAY_SECONDS)
 
-    # --- explicit turn-on detection (spec §7.4) ---
+    # --- turn-on call detection (spec §7.4) ---
 
     @callback
     def _async_on_call_service(self, event: Event) -> None:
         data = event.data
-        if data.get(ATTR_DOMAIN) != LIGHT_DOMAIN or not is_explicit_turn_on(
-            data.get(ATTR_SERVICE, ""), data.get(ATTR_SERVICE_DATA) or {}
+        service = data.get(ATTR_SERVICE, "")
+        if data.get(ATTR_DOMAIN) != LIGHT_DOMAIN or service not in (
+            SERVICE_TURN_ON,
+            SERVICE_TOGGLE,
         ):
             return
         now = dt_util.utcnow()
         cutoff = now - dt.timedelta(seconds=EXPLICIT_CONTEXT_SECONDS)
-        self._explicit = {
-            context_id: at for context_id, at in self._explicit.items() if at > cutoff
+        self._calls = {
+            context_id: call
+            for context_id, call in self._calls.items()
+            if call[0] > cutoff
         }
-        self._explicit[event.context.id] = now
+        explicit = is_explicit_turn_on(service, data.get(ATTR_SERVICE_DATA) or {})
+        # One context can make several calls; any explicit one makes it explicit.
+        explicit |= self._calls.get(event.context.id, (now, False))[1]
+        self._calls[event.context.id] = (now, explicit)
 
     def is_explicit_context(self, context_id: str | None) -> bool:
         """Was this context a recent light.turn_on/toggle that set values?"""
-        at = self._explicit.get(context_id) if context_id else None
-        return at is not None and dt_util.utcnow() - at <= dt.timedelta(
-            seconds=EXPLICIT_CONTEXT_SECONDS
+        return self._recent_call(context_id, explicit_only=True)
+
+    def is_light_call_context(self, context_id: str | None) -> bool:
+        """Was this context any recent light.turn_on/toggle call?"""
+        return self._recent_call(context_id, explicit_only=False)
+
+    def _recent_call(self, context_id: str | None, *, explicit_only: bool) -> bool:
+        call = self._calls.get(context_id) if context_id else None
+        if call is None:
+            return False
+        at, explicit = call
+        return (explicit or not explicit_only) and dt_util.utcnow() - at <= (
+            dt.timedelta(seconds=EXPLICIT_CONTEXT_SECONDS)
         )
 
     # --- global controls (spec §8) ---
