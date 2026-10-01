@@ -18,9 +18,15 @@ async def async_setup_entry(
 ) -> bool:
     """Start the manager for the parent entry and all group subentries."""
     manager = Manager(hass, entry)
-    await manager.async_start()
-    entry.runtime_data = manager
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await manager.async_start()
+        entry.runtime_data = manager
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        # Don't leak the timers and listeners of groups that already started, and
+        # don't save: a half-started manager would overwrite the good stored state.
+        await manager.async_stop(save=False)
+        raise
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
 

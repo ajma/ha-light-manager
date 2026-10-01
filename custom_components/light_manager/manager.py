@@ -78,14 +78,20 @@ class Manager:
             await runtime.async_start(stored_groups.get(subentry_id))
         self.async_schedule_save()  # drops groups that no longer exist
 
-    async def async_stop(self) -> None:
+    async def async_stop(self, *, save: bool = True) -> None:
+        """Stop every group and save, unless `save` is False.
+
+        A start that failed halfway must not save: its half-built state would
+        overwrite the good stored state.
+        """
         self._stopped = True
         if self._unsub_call_service:
             self._unsub_call_service()
             self._unsub_call_service = None
         for runtime in self.groups.values():
             runtime.async_stop()
-        await self._store.async_save(self._snapshot())
+        if save:
+            await self._store.async_save(self._snapshot())
 
     def _sun(self, day: dt.date, event: str) -> dt.datetime | None:
         return get_astral_event_date(self.hass, event, day)
@@ -153,9 +159,13 @@ class Manager:
     async def async_set_global_enabled(self, enabled: bool) -> None:
         was_active = {sid for sid, runtime in self.groups.items() if runtime.active}
         self.global_enabled = enabled
-        for subentry_id, runtime in self.groups.items():
-            if runtime.active and subentry_id not in was_active:
-                await runtime.async_activate()
+        await asyncio.gather(
+            *(
+                runtime.async_activate()
+                for subentry_id, runtime in self.groups.items()
+                if runtime.active and subentry_id not in was_active
+            )
+        )
         self.async_schedule_save()
         self._notify()
 
