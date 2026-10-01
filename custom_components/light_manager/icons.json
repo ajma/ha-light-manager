@@ -1,0 +1,28 @@
+{
+  "entity": {
+    "button": {
+      "day_now": {
+        "default": "mdi:weather-sunny"
+      },
+      "night_now": {
+        "default": "mdi:weather-night"
+      }
+    },
+    "sensor": {
+      "phase": {
+        "default": "mdi:theme-light-dark",
+        "state": {
+          "day": "mdi:weather-sunny",
+          "to_night": "mdi:weather-sunset-down",
+          "night": "mdi:weather-night",
+          "to_day": "mdi:weather-sunset-up"
+        }
+      }
+    },
+    "switch": {
+      "automatic": {
+        "default": "mdi:brightness-auto"
+      }
+    }
+  }
+}

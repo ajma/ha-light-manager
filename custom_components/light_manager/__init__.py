@@ -10,7 +10,7 @@ from .manager import Manager
 
 type LightManagerConfigEntry = ConfigEntry[Manager]
 
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.SENSOR, Platform.SWITCH]
 
 
 async def async_setup_entry(

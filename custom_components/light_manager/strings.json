@@ -136,5 +136,48 @@
         "stay_overridden": "Stay overridden"
       }
     }
+  },
+  "entity": {
+    "button": {
+      "day_now": {
+        "name": "Day now"
+      },
+      "night_now": {
+        "name": "Night now"
+      }
+    },
+    "sensor": {
+      "phase": {
+        "name": "Phase",
+        "state": {
+          "day": "Day",
+          "to_night": "Changing to night",
+          "night": "Night",
+          "to_day": "Changing to day"
+        },
+        "state_attributes": {
+          "progress": {
+            "name": "Progress"
+          },
+          "held": {
+            "name": "Held"
+          },
+          "next_day_target": {
+            "name": "Next day target"
+          },
+          "next_night_target": {
+            "name": "Next night target"
+          },
+          "overridden_lights": {
+            "name": "Overridden lights"
+          }
+        }
+      }
+    },
+    "switch": {
+      "automatic": {
+        "name": "Automatic"
+      }
+    }
   }
 }
