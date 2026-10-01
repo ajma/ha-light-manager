@@ -12,6 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
+from custom_components.light_manager import group as group_module
 from custom_components.light_manager.const import STEP_FADE_SECONDS, TICK_SECONDS
 from custom_components.light_manager.curve import LightCommand
 from custom_components.light_manager.light_tracker import Mode
@@ -480,6 +481,35 @@ async def test_overlapping_applies_send_the_command_once(
     await asyncio.gather(group._async_apply(2), group._async_apply(2))
 
     assert lights.calls_for("light.lamp") == [DAY_CMD]
+
+
+async def test_a_command_that_cannot_be_built_begins_no_earlier_light(
+    hass, freezer, lights, setup_integration, monkeypatch
+) -> None:
+    # Building the dimmer's command raises, so nothing is sent; the lamp, built
+    # first, must not be left recorded as having been commanded.
+    entry = await start(hass, freezer, lights, setup_integration)
+    group = runtime(entry)
+    for tracker in group.trackers.values():
+        tracker.reset_auto()
+    lights.clear()
+    build = group_module.light_command
+    built = []
+
+    def failing_second(pct, kelvin, caps):
+        built.append(pct)
+        if len(built) == 2:
+            raise RuntimeError("cannot build")
+        return build(pct, kelvin, caps)
+
+    monkeypatch.setattr(group_module, "light_command", failing_second)
+
+    with pytest.raises(RuntimeError, match="cannot build"):
+        await group._async_apply(STEP_FADE_SECONDS)
+
+    assert len(built) == 2
+    assert group.trackers["light.lamp"].expected is None  # not begun, so resent
+    assert lights.calls == []
 
 
 async def test_send_failing_after_stop_does_not_rearm_the_timer(

@@ -335,7 +335,9 @@ class GroupRuntime:
         now = dt_util.utcnow()
         phase, progress = self._effective_phase(now)
         targets = set(only) if only is not None else None
-        sends: list[Coroutine[Any, Any, None]] = []
+        due: list[tuple[LightTracker, LightCommand, Reading]] = []
+        # Build every command before beginning any: if building a later light's
+        # command raises, the earlier lights must not be left recorded as sent.
         for entity_id, tracker in self.trackers.items():
             if targets is not None and entity_id not in targets:
                 continue
@@ -357,17 +359,16 @@ class GroupRuntime:
                     _LOGGER.debug("%s: on/off only; never commanded", entity_id)
                 continue
             if tracker.should_send(command):
-                # Begin here, not inside the send: two overlapping applies must not
-                # both pass should_send before either has recorded its command.
-                context = Context()
-                tracker.begin_command(
-                    command,
-                    context.id,
-                    now,
-                    fade,
-                    Reading.from_attributes(state.attributes),
+                due.append(
+                    (tracker, command, Reading.from_attributes(state.attributes))
                 )
-                sends.append(self._async_send(tracker, command, fade, context))
+        sends: list[Coroutine[Any, Any, None]] = []
+        for tracker, command, reading in due:
+            # Begin here, not inside the send: two overlapping applies must not
+            # both pass should_send before either has recorded its command.
+            context = Context()
+            tracker.begin_command(command, context.id, now, fade, reading)
+            sends.append(self._async_send(tracker, command, fade, context))
         if sends:
             await asyncio.gather(*sends)
 
